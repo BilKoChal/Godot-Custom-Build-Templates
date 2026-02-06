@@ -1,0 +1,289 @@
+name: 🤖 Android Builds
+
+on:
+  workflow_dispatch:
+    inputs:
+      godot_ref:
+        description: 'Godot ref (tag/branch/commit). Example: 4.6-stable'
+        required: false
+        type: string
+        default: '4.6-stable'
+
+      # Architectures
+      build_arm32:
+        description: 'Build ARMv7 (arm32)'
+        required: false
+        type: boolean
+        default: true
+      build_arm64:
+        description: 'Build ARMv8 (arm64)'
+        required: false
+        type: boolean
+        default: true
+      build_x86_32:
+        description: 'Build x86_32 (optional; increases size)'
+        required: false
+        type: boolean
+        default: false
+      build_x86_64:
+        description: 'Build x86_64 (optional; increases size)'
+        required: false
+        type: boolean
+        default: false
+
+      # Build type toggles
+      build_debug_template:
+        description: 'Build android_debug.apk'
+        required: false
+        type: boolean
+        default: true
+      build_release_template:
+        description: 'Build android_release.apk'
+        required: false
+        type: boolean
+        default: true
+
+      # Optional SCons flags (like Windows workflow)
+      production:
+        description: 'production=yes'
+        required: false
+        type: boolean
+        default: false
+
+      lto:
+        description: 'LTO mode'
+        required: false
+        type: choice
+        default: 'none'
+        options:
+          - 'none'
+          - 'auto'
+          - 'full'
+          - 'thin'
+
+      optimize:
+        description: 'Optimization focus'
+        required: false
+        type: choice
+        default: 'size'
+        options:
+          - 'speed'
+          - 'size'
+          - 'size_extra'
+
+      debug_symbols:
+        description: 'Include debug symbols'
+        required: false
+        type: choice
+        default: 'no'
+        options:
+          - 'no'
+          - 'yes'
+
+      separate_debug_symbols:
+        description: 'Generate separate *-native-debug-symbols.zip'
+        required: false
+        type: boolean
+        default: false
+
+      dev_build:
+        description: 'dev_build=yes (for troubleshooting)'
+        required: false
+        type: boolean
+        default: false
+
+      swappy:
+        description: 'Enable Swappy frame pacing (swappy=yes)'
+        required: false
+        type: boolean
+        default: true
+
+env:
+  PYTHONIOENCODING: utf8
+
+jobs:
+  build-android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout user repo
+        uses: actions/checkout@v4
+
+      - name: Checkout Godot Engine
+        uses: actions/checkout@v4
+        with:
+          repository: godotengine/godot
+          ref: ${{ inputs.godot_ref }}
+          path: godot
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install SCons
+        run: pip install scons
+
+      - name: Export ANDROID_HOME for SCons
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ANDROID_HOME=${ANDROID_SDK_ROOT}" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}" >> "$GITHUB_ENV"
+          echo "Using ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
+          echo "Using ANDROID_HOME=${ANDROID_SDK_ROOT}"
+
+      - name: Download Swappy (optional)
+        if: inputs.swappy == true
+        working-directory: godot
+        run: python ./misc/scripts/install_swappy_android.py
+
+      - name: Generate sanitized build profile + custom.py
+        shell: python
+        run: |
+          import json, os
+          CRITICAL = {"Mutex", "Time", "Window"}
+
+          src = "build_profile.gdbuild"  # repo root
+          dst_profile = os.path.join("godot", "sanitized_build.gdbuild")
+          dst_custom = os.path.join("godot", "custom.py")
+
+          if not os.path.exists(src):
+              raise SystemExit("ERROR: build_profile.gdbuild not found in repo root")
+
+          with open(src, "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          data.setdefault("disabled_build_options", {})
+          data.setdefault("disabled_classes", [])
+          data["disabled_classes"] = [c for c in data["disabled_classes"] if c not in CRITICAL]
+
+          with open(dst_profile, "w", encoding="utf-8", newline="\n") as f:
+              json.dump(data, f, indent=2)
+
+          options = data.get("disabled_build_options", {})
+          with open(dst_custom, "w", encoding="utf-8", newline="\n") as f:
+              for k, v in options.items():
+                  val = "yes" if bool(v) else "no"
+                  f.write(f'{k}="{val}"\n')
+
+      - name: Decide arches list
+        id: arches
+        shell: bash
+        run: |
+          set -euo pipefail
+          arches=()
+          if [ "${{ inputs.build_arm32 }}" = "true" ]; then arches+=("arm32"); fi
+          if [ "${{ inputs.build_arm64 }}" = "true" ]; then arches+=("arm64"); fi
+          if [ "${{ inputs.build_x86_32 }}" = "true" ]; then arches+=("x86_32"); fi
+          if [ "${{ inputs.build_x86_64 }}" = "true" ]; then arches+=("x86_64"); fi
+
+          if [ "${#arches[@]}" -eq 0 ]; then
+            echo "No architectures selected."
+            exit 1
+          fi
+
+          # Last arch must add generate_apk=yes (Godot docs)
+          last="${arches[-1]}"
+
+          echo "ARCHES=${arches[*]}" >> "$GITHUB_OUTPUT"
+          echo "LAST_ARCH=$last" >> "$GITHUB_OUTPUT"
+
+      - name: Build templates (SCons)
+        working-directory: godot
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          common=(
+            "platform=android"
+            "build_profile=sanitized_build.gdbuild"
+            "debug_symbols=${{ inputs.debug_symbols }}"
+            "optimize=${{ inputs.optimize }}"
+            "lto=${{ inputs.lto }}"
+            "production=$([[ '${{ inputs.production }}' == 'true' ]] && echo yes || echo no)"
+            "swappy=$([[ '${{ inputs.swappy }}' == 'true' ]] && echo yes || echo no)"
+          )
+
+          if [ "${{ inputs.dev_build }}" = "true" ]; then
+            common+=("dev_build=yes")
+          fi
+
+          if [ "${{ inputs.separate_debug_symbols }}" = "true" ]; then
+            common+=("separate_debug_symbols=yes")
+          fi
+
+          build_one_target () {
+            local tgt="$1"
+            echo "=== Building $tgt ==="
+
+            # Build all arches; add generate_apk=yes only on the last one.
+            for a in ${{ steps.arches.outputs.ARCHES }}; do
+              extra=()
+              if [ "$a" = "${{ steps.arches.outputs.LAST_ARCH }}" ]; then
+                extra+=("generate_apk=yes")
+              fi
+
+              echo "scons ${common[*]} target=$tgt arch=$a ${extra[*]}"
+              scons "${common[@]}" "target=$tgt" "arch=$a" "${extra[@]}" -j2
+            done
+          }
+
+          if [ "${{ inputs.build_release_template }}" = "true" ]; then
+            build_one_target "template_release"
+          fi
+
+          if [ "${{ inputs.build_debug_template }}" = "true" ]; then
+            build_one_target "template_debug"
+          fi
+
+          echo "=== bin/ outputs ==="
+          ls -la bin || true
+
+      - name: Collect outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+
+          # These are the documented outputs for templates
+          # - bin/android_release.apk
+          # - bin/android_debug.apk
+          # - bin/android_source.zip
+          # (and optionally *-native-debug-symbols.zip if separate_debug_symbols=yes)
+          for f in godot/bin/android_release.apk godot/bin/android_debug.apk godot/bin/android_source.zip; do
+            if [ -f "$f" ]; then
+              cp "$f" out/
+            fi
+          done
+
+          shopt -s nullglob
+          for f in godot/bin/*-native-debug-symbols.zip; do
+            cp "$f" out/
+          done
+
+          echo "Collected:"
+          ls -la out
+
+          if [ -z "$(ls -A out)" ]; then
+            echo "ERROR: No outputs collected. Check build logs."
+            exit 1
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: godot-android-templates-${{ inputs.godot_ref }}
+          path: out/
+          retention-days: 30
+          if-no-files-found: error
