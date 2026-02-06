@@ -106,49 +106,43 @@ jobs:
       - name: Generate Matrix
         id: set-matrix
         run: |
+          # Build architecture array
           architectures='[]'
           
-          # Add selected architectures
           if [ "${{ inputs.build_x86_32 }}" = "true" ]; then
-            architectures=$(echo "$architectures" | jq '. += ["x86_32"]')
+            architectures=$(echo "$architectures" | jq -c '. += ["x86_32"]')
           fi
           if [ "${{ inputs.build_x86_64 }}" = "true" ]; then
-            architectures=$(echo "$architectures" | jq '. += ["x86_64"]')
+            architectures=$(echo "$architectures" | jq -c '. += ["x86_64"]')
           fi
           if [ "${{ inputs.build_arm64 }}" = "true" ]; then
-            architectures=$(echo "$architectures" | jq '. += ["arm64"]')
+            architectures=$(echo "$architectures" | jq -c '. += ["arm64"]')
           fi
           
           # Always build both debug and release
-          targets='["template_debug", "template_release"]'
+          targets='["template_debug","template_release"]'
           
           # Always build both standard and console
-          subsystems='["gui", "console"]'
+          subsystems='["gui","console"]'
           
-          # Generate all combinations
-          matrix=$(jq -n \
+          # Generate matrix combinations
+          matrix=$(jq -nc \
             --argjson arch "$architectures" \
             --argjson tgt "$targets" \
             --argjson sub "$subsystems" \
-            '{include: [
-              $arch[] as $a | $tgt[] as $t | $sub[] as $s | 
-              {
-                arch: $a, 
-                target: $t, 
-                subsystem: $s,
-                cache_name: ("windows-" + $t + "-" + $a + "-" + $s)
-              }
-            ]}')
+            '{"include": [$arch[] as $a | $tgt[] as $t | $sub[] as $s | {"arch": $a, "target": $t, "subsystem": $s, "cache_name": ("windows-" + $t + "-" + $a + "-" + $s)}]}')
           
-          # Check if any builds are selected
+          # Check if any builds selected
           build_count=$(echo "$matrix" | jq '.include | length')
           
           if [ "$build_count" -eq 0 ]; then
-            echo "has_builds=false" >> $GITHUB_OUTPUT
+            echo "has_builds=false" >> "$GITHUB_OUTPUT"
             echo "ERROR: No architectures selected!"
+            exit 1
           else
-            echo "has_builds=true" >> $GITHUB_OUTPUT
-            echo "matrix=$matrix" >> $GITHUB_OUTPUT
+            echo "has_builds=true" >> "$GITHUB_OUTPUT"
+            echo "matrix=$(echo $matrix | jq -c .)" >> "$GITHUB_OUTPUT"
+            
             echo "Will build $build_count combinations:"
             echo "$matrix" | jq -r '.include[] | "  - \(.target) \(.arch) (\(.subsystem))"'
           fi
@@ -193,7 +187,7 @@ jobs:
           path: |
             godot/.scons_cache
             godot/bin
-          key: ${{ runner.os }}-scons-${{ matrix.cache_name }}-${{ hashFiles('user_config/build_profile.gdbuild') }}
+          key: ${{ runner.os }}-scons-${{ matrix.cache_name }}-${{ hashFiles('build_profile.gdbuild') }}
           restore-keys: |
             ${{ runner.os }}-scons-${{ matrix.cache_name }}-
             ${{ runner.os }}-scons-
@@ -218,14 +212,14 @@ jobs:
         run: |
           Write-Host "Installing DirectX 12 dependencies..."
           
-          $result = python misc\scripts\install_d3d12_sdk_windows.py
+          python misc\scripts\install_d3d12_sdk_windows.py
           
           if ($LASTEXITCODE -eq 0) {
             Write-Host "DirectX 12 SDK installed successfully"
-            echo "D3D12_AVAILABLE=yes" >> $env:GITHUB_OUTPUT
+            "D3D12_AVAILABLE=yes" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           } else {
             Write-Host "Warning: D3D12 installation failed, building without D3D12 support"
-            echo "D3D12_AVAILABLE=no" >> $env:GITHUB_OUTPUT
+            "D3D12_AVAILABLE=no" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           }
         continue-on-error: true
 
@@ -242,7 +236,7 @@ jobs:
               "Window"   # Display/window management
           }
 
-          json_path = os.path.join("user_config", "build_profile.gdbuild")
+          json_path = "build_profile.gdbuild"
           custom_py_path = os.path.join("godot", "custom.py")
           sanitized_json_path = os.path.join("godot", "sanitized_build.json")
 
@@ -359,7 +353,6 @@ jobs:
       - name: Cleanup Build Artifacts
         shell: pwsh
         run: |
-          # Remove unnecessary files to reduce artifact size
           Remove-Item godot/bin/* -Include *.exp,*.lib,*.pdb,*.ilk -Force -ErrorAction SilentlyContinue
           
           Write-Host "=== Compiled files ===" -ForegroundColor Green
@@ -376,10 +369,7 @@ jobs:
           if ($exePath) {
             Write-Host "Testing: $($exePath.Name)" -ForegroundColor Cyan
             
-            # Test version
             & $exePath.FullName --version
-            
-            # Test help
             & $exePath.FullName --help | Select-Object -First 10
             
             Write-Host "Executable test passed!" -ForegroundColor Green
@@ -421,10 +411,7 @@ jobs:
         run: |
           mkdir -p combined_templates
           
-          # Copy all exe files
           find all_templates -name "*.exe" -exec cp {} combined_templates/ \;
-          
-          # Copy DLLs if exist
           find all_templates -name "*.dll" -exec cp {} combined_templates/ \; 2>/dev/null || true
           
           echo "=== Combined Templates ==="
@@ -449,21 +436,17 @@ jobs:
           echo "### 📦 Build Configuration" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Selected Architectures:**" >> $GITHUB_STEP_SUMMARY
-          echo "- x86_32 (32-bit): ${{ inputs.build_x86_32 && '✅' || '❌' }}" >> $GITHUB_STEP_SUMMARY
-          echo "- x86_64 (64-bit): ${{ inputs.build_x86_64 && '✅' || '❌' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- x86_32: ${{ inputs.build_x86_32 && '✅' || '❌' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- x86_64: ${{ inputs.build_x86_64 && '✅' || '❌' }}" >> $GITHUB_STEP_SUMMARY
           echo "- ARM64: ${{ inputs.build_arm64 && '✅' || '❌' }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          echo "**Build Settings:**" >> $GITHUB_STEP_SUMMARY
+          echo "**Settings:**" >> $GITHUB_STEP_SUMMARY
           echo "- Optimization: \`${{ inputs.optimize }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- LTO: \`${{ inputs.lto }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Debug Symbols: ${{ inputs.debug_symbols && '✅' || '❌' }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          echo "**Rendering Backends:**" >> $GITHUB_STEP_SUMMARY
-          echo "- DirectX 12: ${{ inputs.enable_d3d12 && '✅' || '❌' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- D3D12: ${{ inputs.enable_d3d12 && '✅' || '❌' }}" >> $GITHUB_STEP_SUMMARY
           echo "- Vulkan: ${{ inputs.enable_vulkan && '✅' || '❌' }}" >> $GITHUB_STEP_SUMMARY
-          echo "- OpenGL 3: ${{ inputs.enable_opengl3 && '✅' || '❌' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- OpenGL3: ${{ inputs.enable_opengl3 && '✅' || '❌' }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           echo "### 📋 Built Templates" >> $GITHUB_STEP_SUMMARY
@@ -481,8 +464,4 @@ jobs:
           
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### ⬇️ Download" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Download all templates from the **\`godot-4.6-custom-templates-complete\`** artifact above." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "*Built with Godot 4.6-stable*" >> $GITHUB_STEP_SUMMARY
+          echo "All templates: **\`godot-4.6-custom-templates-complete\`**" >> $GITHUB_STEP_SUMMARY
