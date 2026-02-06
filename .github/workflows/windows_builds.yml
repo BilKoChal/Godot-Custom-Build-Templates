@@ -4,10 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       godot_ref:
-        description: 'Godot ref to build (tag/branch/commit). Example: 4.6-stable'
+        description: 'Godot ref (tag/branch/commit). Example: 4.6-stable'
         required: false
         type: string
         default: '4.6-stable'
+
+      build_console:
+        description: 'Build console variants too (adds _console.exe outputs)'
+        required: false
+        type: boolean
+        default: false
 
       build_x86_32:
         description: 'Build x86_32 (32-bit)'
@@ -32,7 +38,7 @@ on:
         default: false
 
       production:
-        description: 'production=yes (more optimizations, may enable LTO behavior)'
+        description: 'production=yes'
         required: false
         type: boolean
         default: false
@@ -80,6 +86,7 @@ jobs:
       - id: mx
         run: |
           set -euo pipefail
+
           archs=()
           if [ "${{ inputs.build_x86_32 }}" = "true" ]; then archs+=("x86_32"); fi
           if [ "${{ inputs.build_x86_64 }}" = "true" ]; then archs+=("x86_64"); fi
@@ -88,15 +95,22 @@ jobs:
             echo "No architectures selected."
             exit 1
           fi
+
+          subs=("gui")
+          if [ "${{ inputs.build_console }}" = "true" ]; then
+            subs=("gui" "console")
+          fi
+
           json='{"include":[]}'
           for a in "${archs[@]}"; do
             for t in template_debug template_release; do
-              for s in gui console; do
+              for s in "${subs[@]}"; do
                 json=$(echo "$json" | jq -c --arg a "$a" --arg t "$t" --arg s "$s" \
                   '.include += [{"arch":$a,"target":$t,"subsystem":$s,"cache_name":("windows-" + $t + "-" + $a + "-" + $s)}]')
               done
             done
           done
+
           echo "matrix=$json" >> "$GITHUB_OUTPUT"
 
   build:
@@ -157,8 +171,10 @@ jobs:
         shell: python
         run: |
           import json, os
+
           CRITICAL = {"Mutex", "Time", "Window"}
-          src = "build_profile.gdbuild"
+
+          src = "build_profile.gdbuild"  # repo root
           dst_profile = os.path.join("godot", "sanitized_build.gdbuild")
           dst_custom = os.path.join("godot", "custom.py")
 
@@ -170,19 +186,18 @@ jobs:
 
           data.setdefault("disabled_build_options", {})
           data.setdefault("disabled_classes", [])
+
+          # ONLY remove the 3 critical classes
           data["disabled_classes"] = [c for c in data["disabled_classes"] if c not in CRITICAL]
 
           with open(dst_profile, "w", encoding="utf-8", newline="\n") as f:
               json.dump(data, f, indent=2)
 
+          # Generate custom.py from disabled_build_options (keep it simple)
           options = data.get("disabled_build_options", {})
           with open(dst_custom, "w", encoding="utf-8", newline="\n") as f:
               for k, v in options.items():
-                  f.write(f'{k}="{"yes" if bool(v) else "no"}"\n')
-              f.write("\n# Workflow-driven options (informational; CLI is authoritative)\n")
-              f.write(f'optimize="${{ inputs.optimize }}"\n')
-              f.write(f'debug_symbols="${{ inputs.debug_symbols }}"\n')
-              f.write('d3d12="no"\n')
+                  f.write(f'{k}="{"yes" if bool(v) else "no"}"\n")
 
       - name: Decide LLVM usage (ThinLTO => use_llvm=yes)
         id: llvm
@@ -194,13 +209,7 @@ jobs:
             "USE_LLVM=no" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           }
 
-      - name: Dump custom.py (debug)
-        shell: pwsh
-        run: |
-          Write-Host "==== custom.py ===="
-          Get-Content godot\custom.py
-
-      - name: Compile (optional flags on CLI)
+      - name: Compile
         working-directory: godot
         shell: cmd
         run: |
@@ -223,29 +232,47 @@ jobs:
             %USE_LLVM_FLAG% ^
             -j4
 
-      - name: Cleanup non-essential build files
+      - name: Rename outputs to requested format
         shell: pwsh
         run: |
-          Remove-Item godot/bin/* -Include *.exp,*.lib,*.pdb,*.ilk -Force -ErrorAction SilentlyContinue
-          Get-ChildItem godot/bin/*.exe | ForEach-Object {
-            $kb = [math]::Round($_.Length / 1KB, 2)
-            Write-Host "Built: $($_.Name) (${kb} KB)"
-          }
+          $target = "${{ matrix.target }}"
+          $arch = "${{ matrix.arch }}"
+          $sub = "${{ matrix.subsystem }}"
 
-      - name: Test executable (skip ARM64)
-        if: matrix.arch != 'arm64'
+          $mode = if ($target -eq "template_debug") { "debug" } else { "release" }
+          $suffix = if ($sub -eq "console") { "_console" } else { "" }
+
+          # Pick the produced exe
+          $exe = Get-ChildItem "godot/bin" -Filter "*.exe" | Select-Object -First 1
+          if (-not $exe) { throw "No .exe found in godot/bin" }
+
+          $outName = "windows_${mode}_${arch}${suffix}.exe"
+          $outPath = Join-Path "godot/bin" $outName
+
+          if (Test-Path $outPath) { Remove-Item $outPath -Force }
+          Rename-Item -Path $exe.FullName -NewName $outName
+
+          Write-Host "Renamed to: $outName"
+
+      - name: Package zip (this job)
         shell: pwsh
         run: |
-          $exe = Get-ChildItem godot/bin/*.exe | Select-Object -First 1
-          if (-not $exe) { throw "No exe found" }
-          & $exe.FullName --version
-          & $exe.FullName --help | Select-Object -First 10
+          $zipName = "${{ matrix.cache_name }}.zip"
+          $zipPath = Join-Path (Get-Location) $zipName
 
-      - name: Upload artifact
+          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+
+          $files = Get-ChildItem "godot/bin" -Filter "windows_*.exe"
+          if (-not $files) { throw "No windows_*.exe files to zip" }
+
+          Compress-Archive -Path $files.FullName -DestinationPath $zipPath
+          Write-Host "Created: $zipName"
+
+      - name: Upload job zip
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.cache_name }}
-          path: godot/bin/*.exe
+          path: ${{ matrix.cache_name }}.zip
           retention-days: 7
           if-no-files-found: error
 
@@ -256,17 +283,21 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: all_templates
+          path: all_zips
 
-      - name: Combine
+      - name: Combine into one zip
         run: |
-          mkdir -p combined_templates
-          find all_templates -name "*.exe" -exec cp {} combined_templates/ \;
-          ls -lh combined_templates || true
+          set -euo pipefail
+          mkdir -p combined
+          find all_zips -name "*.zip" -print -exec unzip -o {} -d combined \;
+          (cd combined && ls -lh)
 
-      - name: Upload combined
+          # Final downloadable zip
+          zip -r godot-windows-custom-templates.zip combined
+
+      - name: Upload combined zip
         uses: actions/upload-artifact@v4
         with:
-          name: godot-4.6-custom-templates-complete
-          path: combined_templates/
+          name: godot-windows-custom-templates
+          path: godot-windows-custom-templates.zip
           retention-days: 30
