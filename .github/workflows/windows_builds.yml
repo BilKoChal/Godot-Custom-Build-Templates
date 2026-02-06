@@ -20,7 +20,7 @@ on:
         default: true
 
       enable_d3d12:
-        description: 'Enable DirectX 12 (auto-installs deps). If false, d3d12=no.'
+        description: 'Enable DirectX 12 (auto-installs deps).'
         required: false
         type: boolean
         default: false
@@ -85,7 +85,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
-
     name: ${{ matrix.target }} ${{ matrix.arch }} (${{ matrix.subsystem }})
 
     steps:
@@ -112,18 +111,27 @@ jobs:
         with:
           arch: ${{ matrix.arch == 'x86_32' && 'x86' || matrix.arch }}
 
+      # Decide D3D12 mode for the whole job (default: no)
+      - name: Decide D3D12 mode
+        id: d3d12mode
+        shell: pwsh
+        run: |
+          "D3D12_MODE=no" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
       - name: Install D3D12 deps (Godot official script)
         if: inputs.enable_d3d12 == true
         working-directory: godot
         shell: pwsh
-        id: d3d12
         run: |
           python misc\scripts\install_d3d12_sdk_windows.py
           if ($LASTEXITCODE -eq 0) {
-            "D3D12_AVAILABLE=yes" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "D3D12_MODE=yes" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           } else {
-            "D3D12_AVAILABLE=no" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            Write-Host "D3D12 deps install failed; falling back to d3d12=no"
+            "D3D12_MODE=no" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           }
+        id: d3d12install
+        continue-on-error: true
 
       - name: Generate custom.py and sanitized build profile
         shell: python
@@ -132,8 +140,7 @@ jobs:
 
           CRITICAL = {"Mutex", "Time", "Window"}
 
-          # build_profile.gdbuild is at repo root
-          src = "build_profile.gdbuild"
+          src = "build_profile.gdbuild"  # repo root
           dst_profile = os.path.join("godot", "sanitized_build.gdbuild")
           dst_custom = os.path.join("godot", "custom.py")
 
@@ -146,18 +153,12 @@ jobs:
           data.setdefault("disabled_build_options", {})
           data.setdefault("disabled_classes", [])
 
-          # ONLY remove the 3 critical classes (nothing else)
           before = list(data["disabled_classes"])
           data["disabled_classes"] = [c for c in data["disabled_classes"] if c not in CRITICAL]
-          removed = sorted(set(before) - set(data["disabled_classes"]))
-          if removed:
-              print("Removed critical classes from disabled_classes:", ", ".join(removed))
 
-          # Write sanitized .gdbuild (still JSON)
           with open(dst_profile, "w", encoding="utf-8", newline="\n") as f:
               json.dump(data, f, indent=2)
 
-          # Generate custom.py: disabled_build_options + forced defaults
           options = data.get("disabled_build_options", {})
           with open(dst_custom, "w", encoding="utf-8", newline="\n") as f:
               for k, v in options.items():
@@ -177,16 +178,13 @@ jobs:
               if lto_mode and lto_mode != "none":
                   f.write(f'lto="{lto_mode}"\n')
 
-              # D3D12 (default off unless enabled AND deps available)
-              enable_d3d12 = "${{ inputs.enable_d3d12 }}" == "true"
-              d3d12_available = "${{ steps.d3d12.outputs.D3D12_AVAILABLE }}" == "yes"
-              if enable_d3d12 and d3d12_available:
-                  f.write('d3d12="yes"\n')
-              else:
+              # Also write d3d12 in custom.py (fine), but CLI will be authoritative.
+              d3d12_mode = "${{ steps.d3d12install.outputs.D3D12_MODE }}"
+              # If enable_d3d12 was false, d3d12_mode will likely be empty; treat as "no".
+              if d3d12_mode != "yes":
                   f.write('d3d12="no"\n')
-
-          print("Wrote:", dst_profile)
-          print("Wrote:", dst_custom)
+              else:
+                  f.write('d3d12="yes"\n')
 
       - name: Dump custom.py (debug)
         shell: pwsh
@@ -199,7 +197,7 @@ jobs:
         shell: cmd
         run: |
           echo Building ${{ matrix.target }} for ${{ matrix.arch }} (${{ matrix.subsystem }})
-          scons p=windows target=${{ matrix.target }} arch=${{ matrix.arch }} windows_subsystem=${{ matrix.subsystem }} build_profile=sanitized_build.gdbuild -j4
+          scons p=windows target=${{ matrix.target }} arch=${{ matrix.arch }} windows_subsystem=${{ matrix.subsystem }} build_profile=sanitized_build.gdbuild d3d12=${{ steps.d3d12install.outputs.D3D12_MODE || 'no' }} -j4
 
       - name: Cleanup non-essential build files
         shell: pwsh
