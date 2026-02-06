@@ -1,38 +1,36 @@
-name: 🏁 Build Custom Godot Templates
+name: 🏁 Build Custom Godot Templates (Windows)
 
 on:
   workflow_dispatch:
     inputs:
-      # Architecture Selection (Only 3 checkboxes)
       build_x86_32:
-        description: '🔲 Build x86_32 (32-bit) templates'
+        description: 'Build x86_32 (32-bit)'
         required: false
         type: boolean
         default: true
-      
       build_x86_64:
-        description: '🔲 Build x86_64 (64-bit) templates'
+        description: 'Build x86_64 (64-bit)'
         required: false
         type: boolean
         default: true
-      
       build_arm64:
-        description: '🔲 Build ARM64 templates'
+        description: 'Build ARM64'
         required: false
         type: boolean
         default: true
-      
-      # Optimization Options
-      optimize:
-        description: 'Optimization mode'
+
+      enable_d3d12:
+        description: 'Enable DirectX 12 (auto-installs deps). If false, d3d12=no.'
         required: false
-        type: choice
-        default: 'size'
-        options:
-          - 'speed'
-          - 'size'
-          - 'none'
-      
+        type: boolean
+        default: false
+
+      production:
+        description: 'Enable production build'
+        required: false
+        type: boolean
+        default: false
+
       lto:
         description: 'Link-Time Optimization (LTO)'
         required: false
@@ -43,127 +41,56 @@ on:
           - 'auto'
           - 'full'
           - 'thin'
-      
-      debug_symbols:
-        description: 'Include debug symbols'
-        required: false
-        type: boolean
-        default: false
-      
-      # Rendering Backends
-      enable_d3d12:
-        description: 'Enable DirectX 12 support'
-        required: false
-        type: boolean
-        default: false
-      
-      enable_vulkan:
-        description: 'Enable Vulkan support'
-        required: false
-        type: boolean
-        default: true
-      
-      enable_opengl3:
-        description: 'Enable OpenGL 3 support'
-        required: false
-        type: boolean
-        default: true
-      
-      # Compiler Options
-      use_llvm:
-        description: 'Use LLVM/Clang compiler'
-        required: false
-        type: boolean
-        default: false
-      
-      use_mingw:
-        description: 'Use MinGW compiler'
-        required: false
-        type: boolean
-        default: false
-      
-      use_static_cpp:
-        description: 'Static link C++ runtime'
-        required: false
-        type: boolean
-        default: false
 
-# Global Settings
 env:
-  SCONS_CACHE_MSVC_CONFIG: true
   PYTHONIOENCODING: utf8
+  SCONS_CACHE_MSVC_CONFIG: true
 
 jobs:
-  # Generate dynamic matrix based on architecture selection
   generate-matrix:
     runs-on: ubuntu-latest
-    name: Generate Build Matrix
     outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-      has_builds: ${{ steps.set-matrix.outputs.has_builds }}
-    
+      matrix: ${{ steps.mx.outputs.matrix }}
     steps:
-      - name: Generate Matrix
-        id: set-matrix
+      - id: mx
         run: |
-          # Build architecture array
-          architectures='[]'
-          
-          if [ "${{ inputs.build_x86_32 }}" = "true" ]; then
-            architectures=$(echo "$architectures" | jq -c '. += ["x86_32"]')
-          fi
-          if [ "${{ inputs.build_x86_64 }}" = "true" ]; then
-            architectures=$(echo "$architectures" | jq -c '. += ["x86_64"]')
-          fi
-          if [ "${{ inputs.build_arm64 }}" = "true" ]; then
-            architectures=$(echo "$architectures" | jq -c '. += ["arm64"]')
-          fi
-          
-          # Always build both debug and release
-          targets='["template_debug","template_release"]'
-          
-          # Always build both standard and console
-          subsystems='["gui","console"]'
-          
-          # Generate matrix combinations
-          matrix=$(jq -nc \
-            --argjson arch "$architectures" \
-            --argjson tgt "$targets" \
-            --argjson sub "$subsystems" \
-            '{"include": [$arch[] as $a | $tgt[] as $t | $sub[] as $s | {"arch": $a, "target": $t, "subsystem": $s, "cache_name": ("windows-" + $t + "-" + $a + "-" + $s)}]}')
-          
-          # Check if any builds selected
-          build_count=$(echo "$matrix" | jq '.include | length')
-          
-          if [ "$build_count" -eq 0 ]; then
-            echo "has_builds=false" >> "$GITHUB_OUTPUT"
-            echo "ERROR: No architectures selected!"
+          set -euo pipefail
+
+          archs=()
+          if [ "${{ inputs.build_x86_32 }}" = "true" ]; then archs+=("x86_32"); fi
+          if [ "${{ inputs.build_x86_64 }}" = "true" ]; then archs+=("x86_64"); fi
+          if [ "${{ inputs.build_arm64 }}" = "true" ]; then archs+=("arm64"); fi
+
+          if [ "${#archs[@]}" -eq 0 ]; then
+            echo "No architectures selected."
             exit 1
-          else
-            echo "has_builds=true" >> "$GITHUB_OUTPUT"
-            echo "matrix=$(echo $matrix | jq -c .)" >> "$GITHUB_OUTPUT"
-            
-            echo "Will build $build_count combinations:"
-            echo "$matrix" | jq -r '.include[] | "  - \(.target) \(.arch) (\(.subsystem))"'
           fi
 
-  # Main build job
-  build-windows-templates:
+          json='{"include":[]}'
+          for a in "${archs[@]}"; do
+            for t in template_debug template_release; do
+              for s in gui console; do
+                json=$(echo "$json" | jq -c --arg a "$a" --arg t "$t" --arg s "$s" \
+                  '.include += [{"arch":$a,"target":$t,"subsystem":$s,"cache_name":("windows-" + $t + "-" + $a + "-" + $s)}]')
+              done
+            done
+          done
+
+          echo "matrix=$json" >> "$GITHUB_OUTPUT"
+
+  build:
     needs: generate-matrix
-    if: needs.generate-matrix.outputs.has_builds == 'true'
     runs-on: windows-latest
-    name: ${{ matrix.target }} ${{ matrix.arch }} (${{ matrix.subsystem }})
     timeout-minutes: 120
-    
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
-    
+
+    name: ${{ matrix.target }} ${{ matrix.arch }} (${{ matrix.subsystem }})
+
     steps:
-      - name: Checkout User Repository
+      - name: Checkout user repo
         uses: actions/checkout@v4
-        with:
-          path: user_config
 
       - name: Checkout Godot Engine
         uses: actions/checkout@v4
@@ -171,9 +98,8 @@ jobs:
           repository: godotengine/godot
           ref: 4.6-stable
           path: godot
-          submodules: recursive
 
-      - name: Setup Python and SCons
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
@@ -181,220 +107,118 @@ jobs:
       - name: Install SCons
         run: pip install scons
 
-      - name: Restore SCons Cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            godot/.scons_cache
-            godot/bin
-          key: ${{ runner.os }}-scons-${{ matrix.cache_name }}-${{ hashFiles('build_profile.gdbuild') }}
-          restore-keys: |
-            ${{ runner.os }}-scons-${{ matrix.cache_name }}-
-            ${{ runner.os }}-scons-
-        continue-on-error: true
-
-      - name: Setup MSVC Compiler
-        if: inputs.use_llvm == false && inputs.use_mingw == false
+      - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: ${{ matrix.arch == 'x86_32' && 'x86' || matrix.arch }}
 
-      - name: Setup LLVM Compiler
-        if: inputs.use_llvm == true
-        uses: egor-tensin/setup-clang@v1
-        with:
-          version: latest
-
-      - name: Install DirectX 12 SDK
+      - name: Install D3D12 deps (Godot official script)
+        if: inputs.enable_d3d12 == true
         working-directory: godot
         shell: pwsh
-        id: d3d12-sdk
+        id: d3d12
         run: |
-          Write-Host "Installing DirectX 12 dependencies..."
-          
           python misc\scripts\install_d3d12_sdk_windows.py
-          
           if ($LASTEXITCODE -eq 0) {
-            Write-Host "DirectX 12 SDK installed successfully"
             "D3D12_AVAILABLE=yes" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           } else {
-            Write-Host "Warning: D3D12 installation failed, building without D3D12 support"
             "D3D12_AVAILABLE=no" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           }
-        continue-on-error: true
 
-      - name: Process build_profile.gdbuild and Generate custom.py
+      - name: Generate custom.py and sanitized build profile
         shell: python
         run: |
-          import json
-          import os
+          import json, os
 
-          # CRITICAL CLASSES - Must NEVER be disabled (based on issue #113595)
-          CRITICAL_CLASSES = {
-              "Mutex",   # Synchronization primitive used everywhere
-              "Time",    # Core time functionality
-              "Window"   # Display/window management
-          }
+          CRITICAL = {"Mutex", "Time", "Window"}
 
-          json_path = "build_profile.gdbuild"
-          custom_py_path = os.path.join("godot", "custom.py")
-          sanitized_json_path = os.path.join("godot", "sanitized_build.json")
+          # build_profile.gdbuild is now at repo root
+          src = "build_profile.gdbuild"
+          dst_profile = os.path.join("godot", "sanitized_build.gdbuild")
+          dst_custom = os.path.join("godot", "custom.py")
 
-          print(f"Reading config from {json_path}")
-          
-          # Load or create default build_profile.gdbuild
-          if not os.path.exists(json_path):
-              print("Warning: build_profile.gdbuild not found, creating default config")
-              data = {
-                  "disabled_classes": [],
-                  "disabled_build_options": {}
-              }
-          else:
-              with open(json_path, 'r', encoding='utf-8') as f:
-                  data = json.load(f)
-          
-          # Filter critical classes from disabled_classes
-          if "disabled_classes" in data and len(data["disabled_classes"]) > 0:
-              original_disabled = set(data["disabled_classes"])
-              critical_found = original_disabled.intersection(CRITICAL_CLASSES)
-              
-              if critical_found:
-                  print("")
-                  print("WARNING: Found CRITICAL classes in disabled list:")
-                  for cls in sorted(critical_found):
-                      print(f"   - {cls}")
-                  print("")
-                  print("Removing them to prevent build errors (see issue #113595)")
-                  
-                  data["disabled_classes"] = [
-                      c for c in data["disabled_classes"] 
-                      if c not in CRITICAL_CLASSES
-                  ]
-                  
-                  print(f"Filtered: {len(original_disabled)} -> {len(data['disabled_classes'])} classes")
-          
-          # Save sanitized build profile
-          with open(sanitized_json_path, 'w', encoding='utf-8') as f:
-              json.dump(data, f, indent=4)
-          
-          print("")
-          print(f"Saved sanitized profile: {len(data.get('disabled_classes', []))} disabled classes")
-          
-          # Generate custom.py
+          if not os.path.exists(src):
+              raise SystemExit("ERROR: build_profile.gdbuild not found in repo root")
+
+          with open(src, "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          data.setdefault("disabled_build_options", {})
+          data.setdefault("disabled_classes", [])
+
+          # ONLY remove the 3 critical classes (nothing else)
+          before = list(data["disabled_classes"])
+          data["disabled_classes"] = [c for c in data["disabled_classes"] if c not in CRITICAL]
+          removed = sorted(set(before) - set(data["disabled_classes"]))
+          if removed:
+              print("Removed critical classes from disabled_classes:", ", ".join(removed))
+
+          # Write sanitized .gdbuild (still JSON)
+          with open(dst_profile, "w", encoding="utf-8") as f:
+              json.dump(data, f, indent=2)
+
+          # Generate custom.py: use disabled_build_options + small set of forced defaults
           options = data.get("disabled_build_options", {})
-          
-          print("")
-          print("Generating custom.py:")
-          with open(custom_py_path, 'w', encoding='utf-8') as f:
-              # User options from build_profile.gdbuild
-              if options:
-                  f.write("# Options from build_profile.gdbuild\n")
-                  for key, value in options.items():
-                      scons_value = "yes" if value else "no"
-                      line = f'{key}="{scons_value}"'
-                      print(f"  {line}")
-                      f.write(line + "\n")
-                  f.write('\n')
-              
-              # Workflow inputs
-              f.write('# Optimization settings\n')
-              f.write(f'optimize="${{ inputs.optimize }}"\n')
-              f.write(f'lto="${{ inputs.lto }}"\n')
-              f.write(f'debug_symbols="{"yes" if "${{ inputs.debug_symbols }}" == "true" else "no"}"\n')
-              f.write('\n')
-              
-              f.write('# Rendering backends\n')
-              d3d12_enabled = "${{ inputs.enable_d3d12 }}" == "true" and "${{ steps.d3d12-sdk.outputs.D3D12_AVAILABLE }}" == "yes"
-              f.write(f'd3d12="{"yes" if d3d12_enabled else "no"}"\n')
-              f.write(f'vulkan="{"yes" if "${{ inputs.enable_vulkan }}" == "true" else "no"}"\n')
-              f.write(f'opengl3="{"yes" if "${{ inputs.enable_opengl3 }}" == "true" else "no"}"\n')
-              f.write('\n')
-              
-              f.write('# Compiler options\n')
-              if "${{ inputs.use_llvm }}" == "true":
-                  f.write('use_llvm="yes"\n')
-              if "${{ inputs.use_mingw }}" == "true":
-                  f.write('use_mingw="yes"\n')
-              if "${{ inputs.use_static_cpp }}" == "true":
-                  f.write('use_static_cpp="yes"\n')
-              f.write('\n')
-              
-              f.write('# Production build\n')
-              f.write('production="yes"\n')
-              
-              print("")
-              print("Configuration applied:")
-              print(f"  Optimize: ${{ inputs.optimize }}")
-              print(f"  LTO: ${{ inputs.lto }}")
-              print(f"  D3D12: {'yes' if d3d12_enabled else 'no'}")
-              print(f"  Vulkan: ${{ inputs.enable_vulkan }}")
-              print(f"  OpenGL3: ${{ inputs.enable_opengl3 }}")
+          with open(dst_custom, "w", encoding="utf-8") as f:
+              for k, v in options.items():
+                  f.write(f'{k}="{"yes" if bool(v) else "no"}"\\n')
 
-      - name: Display Build Configuration
+              f.write('\\n# Forced defaults (size-focused)\\n')
+              f.write('optimize="size"\\n')
+              f.write('debug_symbols="no"\\n')
+
+              # Optional production flag (default off)
+              prod = "${{ inputs.production }}" == "true"
+              if prod:
+                  f.write('production="yes"\\n')
+
+              # Optional LTO (default none)
+              lto_mode = "${{ inputs.lto }}".strip()
+              if lto_mode and lto_mode != "none":
+                  f.write(f'lto="{lto_mode}"\\n')
+
+              # D3D12 (default off unless enabled AND deps available)
+              enable_d3d12 = "${{ inputs.enable_d3d12 }}" == "true"
+              d3d12_available = "${{ steps.d3d12.outputs.D3D12_AVAILABLE }}" == "yes"
+              if enable_d3d12 and d3d12_available:
+                  f.write('d3d12="yes"\\n')
+              else:
+                  f.write('d3d12="no"\\n')
+
+          print("Wrote:", dst_profile)
+          print("Wrote:", dst_custom)
+
+      - name: Show custom.py (debug)
         shell: pwsh
         run: |
-          Write-Host "=== Build Configuration ===" -ForegroundColor Cyan
-          Write-Host "Architecture: ${{ matrix.arch }}" -ForegroundColor Yellow
-          Write-Host "Target: ${{ matrix.target }}" -ForegroundColor Yellow
-          Write-Host "Subsystem: ${{ matrix.subsystem }}" -ForegroundColor Yellow
-          Write-Host ""
-          Write-Host "=== custom.py content ===" -ForegroundColor Cyan
-          if (Test-Path "godot\custom.py") {
-            Get-Content godot\custom.py | Write-Host
-          }
+          Get-Content godot\custom.py
 
-      - name: Compile Template
+      - name: Compile
         working-directory: godot
         shell: cmd
         run: |
           echo Building ${{ matrix.target }} for ${{ matrix.arch }} (${{ matrix.subsystem }})
-          scons p=windows target=${{ matrix.target }} arch=${{ matrix.arch }} build_profile=sanitized_build.json windows_subsystem=${{ matrix.subsystem }} production=yes -j4
+          scons p=windows target=${{ matrix.target }} arch=${{ matrix.arch }} windows_subsystem=${{ matrix.subsystem }} build_profile=sanitized_build.gdbuild -j4
 
-      - name: Cleanup Build Artifacts
+      - name: Cleanup non-essential build files
         shell: pwsh
         run: |
           Remove-Item godot/bin/* -Include *.exp,*.lib,*.pdb,*.ilk -Force -ErrorAction SilentlyContinue
-          
-          Write-Host "=== Compiled files ===" -ForegroundColor Green
           Get-ChildItem godot/bin/*.exe | ForEach-Object {
-            $sizeKB = [math]::Round($_.Length / 1KB, 2)
-            Write-Host "  $($_.Name) - ${sizeKB} KB" -ForegroundColor White
+            $kb = [math]::Round($_.Length / 1KB, 2)
+            Write-Host "Built: $($_.Name) (${kb} KB)"
           }
 
-      - name: Test Executable (x86 only)
+      - name: Test executable (skip ARM64)
         if: matrix.arch != 'arm64'
         shell: pwsh
         run: |
-          $exePath = Get-ChildItem godot/bin/*.exe | Select-Object -First 1
-          
-          if ($exePath) {
-            Write-Host "Testing: $($exePath.Name)" -ForegroundColor Cyan
-            
-            & $exePath.FullName --version
-            & $exePath.FullName --help | Select-Object -First 10
-            
-            Write-Host "Executable test passed!" -ForegroundColor Green
-          } else {
-            Write-Host "ERROR: No executable found!" -ForegroundColor Red
-            exit 1
-          }
+          $exe = Get-ChildItem godot/bin/*.exe | Select-Object -First 1
+          if (-not $exe) { throw "No exe found" }
+          & $exe.FullName --version
+          & $exe.FullName --help | Select-Object -First 10
 
-      - name: Verify ARM64 Build (skip execution test)
-        if: matrix.arch == 'arm64'
-        shell: pwsh
-        run: |
-          $exePath = Get-ChildItem godot/bin/*.exe | Select-Object -First 1
-          
-          if ($exePath) {
-            $sizeKB = [math]::Round($exePath.Length / 1KB, 2)
-            Write-Host "ARM64 executable built successfully: $($exePath.Name) (${sizeKB} KB)" -ForegroundColor Green
-            Write-Host "Note: Skipping execution test (ARM64 cannot run on x86_64 runner)" -ForegroundColor Yellow
-          } else {
-            Write-Host "ERROR: No executable found!" -ForegroundColor Red
-            exit 1
-          }
-
-      - name: Upload Build Artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.cache_name }}
@@ -402,82 +226,24 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-      - name: Upload D3D12 DLLs
-        if: inputs.enable_d3d12 == true && steps.d3d12-sdk.outputs.D3D12_AVAILABLE == 'yes'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.cache_name }}-d3d12-dlls
-          path: godot/bin/*.dll
-          retention-days: 7
-          if-no-files-found: warn
-
-  # Combine all artifacts
-  combine-artifacts:
+  combine:
     runs-on: ubuntu-latest
-    needs: build-windows-templates
-    name: Combine All Templates
-    
+    needs: build
     steps:
-      - name: Download All Artifacts
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: all_templates
 
-      - name: Organize Templates
+      - name: Combine
         run: |
           mkdir -p combined_templates
-          
           find all_templates -name "*.exe" -exec cp {} combined_templates/ \;
-          find all_templates -name "*.dll" -exec cp {} combined_templates/ \; 2>/dev/null || true
-          
-          echo "=== Combined Templates ==="
-          ls -lh combined_templates/
-          
-          total=$(find combined_templates -name "*.exe" | wc -l)
-          echo ""
-          echo "Total templates built: $total"
+          ls -lh combined_templates || true
 
-      - name: Upload Combined Package
+      - name: Upload combined
         uses: actions/upload-artifact@v4
         with:
           name: godot-4.6-custom-templates-complete
           path: combined_templates/
           retention-days: 30
-
-      - name: Generate Build Summary
-        run: |
-          echo "## 🎉 Build Complete!" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          echo "### 📦 Build Configuration" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Selected Architectures:**" >> $GITHUB_STEP_SUMMARY
-          echo "- x86_32: ${{ inputs.build_x86_32 && '✅' || '❌' }}" >> $GITHUB_STEP_SUMMARY
-          echo "- x86_64: ${{ inputs.build_x86_64 && '✅' || '❌' }}" >> $GITHUB_STEP_SUMMARY
-          echo "- ARM64: ${{ inputs.build_arm64 && '✅' || '❌' }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          echo "**Settings:**" >> $GITHUB_STEP_SUMMARY
-          echo "- Optimization: \`${{ inputs.optimize }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- LTO: \`${{ inputs.lto }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- D3D12: ${{ inputs.enable_d3d12 && '✅' || '❌' }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Vulkan: ${{ inputs.enable_vulkan && '✅' || '❌' }}" >> $GITHUB_STEP_SUMMARY
-          echo "- OpenGL3: ${{ inputs.enable_opengl3 && '✅' || '❌' }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          echo "### 📋 Built Templates" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Template | Size |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|------|" >> $GITHUB_STEP_SUMMARY
-          
-          for file in combined_templates/*.exe; do
-            if [ -f "$file" ]; then
-              filename=$(basename "$file")
-              size=$(du -h "$file" | cut -f1)
-              echo "| \`$filename\` | $size |" >> $GITHUB_STEP_SUMMARY
-            fi
-          done
-          
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### ⬇️ Download" >> $GITHUB_STEP_SUMMARY
-          echo "All templates: **\`godot-4.6-custom-templates-complete\`**" >> $GITHUB_STEP_SUMMARY
