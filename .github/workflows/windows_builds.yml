@@ -9,8 +9,8 @@ on:
         type: string
         default: '4.6-stable'
 
-      build_console:
-        description: 'Build console variants too (adds _console.exe outputs)'
+      console_subsystem:
+        description: 'If enabled: pass windows_subsystem=console (single EXE with console). If disabled (default): build produces two EXEs (normal + .console).'
         required: false
         type: boolean
         default: false
@@ -96,18 +96,11 @@ jobs:
             exit 1
           fi
 
-          subs=("gui")
-          if [ "${{ inputs.build_console }}" = "true" ]; then
-            subs=("gui" "console")
-          fi
-
           json='{"include":[]}'
           for a in "${archs[@]}"; do
             for t in template_debug template_release; do
-              for s in "${subs[@]}"; do
-                json=$(echo "$json" | jq -c --arg a "$a" --arg t "$t" --arg s "$s" \
-                  '.include += [{"arch":$a,"target":$t,"subsystem":$s,"cache_name":("windows-" + $t + "-" + $a + "-" + $s)}]')
-              done
+              json=$(echo "$json" | jq -c --arg a "$a" --arg t "$t" \
+                '.include += [{"arch":$a,"target":$t,"cache_name":("windows-" + $t + "-" + $a)}]')
             done
           done
 
@@ -121,7 +114,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
 
-    name: ${{ matrix.target }} ${{ matrix.arch }} (${{ matrix.subsystem }})
+    name: ${{ matrix.target }} ${{ matrix.arch }}
 
     steps:
       - name: Checkout user repo
@@ -171,10 +164,9 @@ jobs:
         shell: python
         run: |
           import json, os
-
           CRITICAL = {"Mutex", "Time", "Window"}
 
-          src = "build_profile.gdbuild"  # repo root
+          src = "build_profile.gdbuild"
           dst_profile = os.path.join("godot", "sanitized_build.gdbuild")
           dst_custom = os.path.join("godot", "custom.py")
 
@@ -186,14 +178,12 @@ jobs:
 
           data.setdefault("disabled_build_options", {})
           data.setdefault("disabled_classes", [])
-
-          # ONLY remove the 3 critical classes
           data["disabled_classes"] = [c for c in data["disabled_classes"] if c not in CRITICAL]
 
           with open(dst_profile, "w", encoding="utf-8", newline="\n") as f:
               json.dump(data, f, indent=2)
 
-          # Generate custom.py from disabled_build_options (keep it simple)
+          # custom.py only from disabled_build_options
           options = data.get("disabled_build_options", {})
           with open(dst_custom, "w", encoding="utf-8", newline="\n") as f:
               for k, v in options.items():
@@ -213,16 +203,18 @@ jobs:
         working-directory: godot
         shell: cmd
         run: |
-          echo Building ${{ matrix.target }} for ${{ matrix.arch }} (${{ matrix.subsystem }})
+          echo Building ${{ matrix.target }} for ${{ matrix.arch }}
 
           set USE_LLVM_FLAG=
           if "${{ steps.llvm.outputs.USE_LLVM }}"=="yes" set USE_LLVM_FLAG=use_llvm=yes
+
+          set WS_FLAG=
+          if "${{ inputs.console_subsystem }}"=="true" set WS_FLAG=windows_subsystem=console
 
           scons ^
             p=windows ^
             target=${{ matrix.target }} ^
             arch=${{ matrix.arch }} ^
-            windows_subsystem=${{ matrix.subsystem }} ^
             build_profile=sanitized_build.gdbuild ^
             d3d12=${{ steps.d3d12mode.outputs.D3D12_MODE }} ^
             debug_symbols=${{ inputs.debug_symbols }} ^
@@ -230,6 +222,7 @@ jobs:
             lto=${{ inputs.lto }} ^
             production=${{ inputs.production && 'yes' || 'no' }} ^
             %USE_LLVM_FLAG% ^
+            %WS_FLAG% ^
             -j4
 
       - name: Rename outputs to requested format
@@ -237,36 +230,62 @@ jobs:
         run: |
           $target = "${{ matrix.target }}"
           $arch = "${{ matrix.arch }}"
-          $sub = "${{ matrix.subsystem }}"
-
           $mode = if ($target -eq "template_debug") { "debug" } else { "release" }
-          $suffix = if ($sub -eq "console") { "_console" } else { "" }
 
-          # Pick the produced exe
-          $exe = Get-ChildItem "godot/bin" -Filter "*.exe" | Select-Object -First 1
-          if (-not $exe) { throw "No .exe found in godot/bin" }
+          $consoleSubsystem = ("${{ inputs.console_subsystem }}" -eq "true")
 
-          $outName = "windows_${mode}_${arch}${suffix}.exe"
-          $outPath = Join-Path "godot/bin" $outName
+          $outDir = Join-Path "godot" "out"
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
-          if (Test-Path $outPath) { Remove-Item $outPath -Force }
-          Rename-Item -Path $exe.FullName -NewName $outName
+          $binDir = Join-Path "godot" "bin"
+          $exes = Get-ChildItem $binDir -Filter "*.exe"
+          if (-not $exes) { throw "No .exe files found in godot/bin" }
 
-          Write-Host "Renamed to: $outName"
+          if ($consoleSubsystem) {
+            # Expect single exe
+            $exe = $exes | Select-Object -First 1
+            Copy-Item $exe.FullName (Join-Path $outDir "windows_${mode}_${arch}.exe") -Force
+            Write-Host "Single output: windows_${mode}_${arch}.exe"
+          } else {
+            # Expect 2 exes: normal and *.console.exe (order not guaranteed)
+            $normal = $exes | Where-Object { $_.Name -notmatch '\.console\.exe$' } | Select-Object -First 1
+            $console = $exes | Where-Object { $_.Name -match '\.console\.exe$' } | Select-Object -First 1
 
-      - name: Package zip (this job)
+            if (-not $normal -or -not $console) {
+              Write-Host "Found exes:"
+              $exes | ForEach-Object { Write-Host " - $($_.Name)" }
+              throw "Expected both normal exe and *.console.exe when console_subsystem=false"
+            }
+
+            Copy-Item $normal.FullName (Join-Path $outDir "windows_${mode}_${arch}.exe") -Force
+            Copy-Item $console.FullName (Join-Path $outDir "windows_${mode}_${arch}_console.exe") -Force
+
+            Write-Host "Outputs:"
+            Write-Host " - windows_${mode}_${arch}.exe"
+            Write-Host " - windows_${mode}_${arch}_console.exe"
+          }
+
+      - name: Zip outputs (this job)
         shell: pwsh
         run: |
           $zipName = "${{ matrix.cache_name }}.zip"
-          $zipPath = Join-Path (Get-Location) $zipName
+          if (Test-Path $zipName) { Remove-Item $zipName -Force }
 
-          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+          $files = Get-ChildItem "godot/out" -Filter "windows_*.exe"
+          if (-not $files) { throw "No outputs found in godot/out" }
 
-          $files = Get-ChildItem "godot/bin" -Filter "windows_*.exe"
-          if (-not $files) { throw "No windows_*.exe files to zip" }
+          Compress-Archive -Path $files.FullName -DestinationPath $zipName
+          Write-Host "Created $zipName with:"
+          $files | ForEach-Object { Write-Host " - $($_.Name)" }
 
-          Compress-Archive -Path $files.FullName -DestinationPath $zipPath
-          Write-Host "Created: $zipName"
+      - name: Test executable (skip ARM64)
+        if: matrix.arch != 'arm64'
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem "godot/out" -Filter "windows_*.exe" | Select-Object -First 1
+          if (-not $exe) { throw "No output exe found" }
+          & $exe.FullName --version
+          & $exe.FullName --help | Select-Object -First 10
 
       - name: Upload job zip
         uses: actions/upload-artifact@v4
@@ -291,8 +310,6 @@ jobs:
           mkdir -p combined
           find all_zips -name "*.zip" -print -exec unzip -o {} -d combined \;
           (cd combined && ls -lh)
-
-          # Final downloadable zip
           zip -r godot-windows-custom-templates.zip combined
 
       - name: Upload combined zip
