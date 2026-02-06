@@ -25,14 +25,12 @@ on:
         type: boolean
         default: true
 
-      # Rendering driver toggle (needs deps if enabled)
       enable_d3d12:
         description: 'Enable Direct3D 12 (installs deps). If unchecked, d3d12=no is forced.'
         required: false
         type: boolean
         default: false
 
-      # Production/LTO per docs
       production:
         description: 'production=yes (more optimizations, may enable LTO behavior)'
         required: false
@@ -40,7 +38,7 @@ on:
         default: false
 
       lto:
-        description: 'LTO mode (docs suggest full for max effect; thin is LLVM only).'
+        description: 'LTO mode (thin requires LLVM).'
         required: false
         type: choice
         default: 'none'
@@ -50,7 +48,6 @@ on:
           - 'full'
           - 'thin'
 
-      # Size optimization per docs (size_extra available in newer Godot)
       optimize:
         description: 'Optimization focus'
         required: false
@@ -62,7 +59,7 @@ on:
           - 'size_extra'
 
       debug_symbols:
-        description: 'Include debug symbols (MSVC: use "no" for smaller binaries)'
+        description: 'Include debug symbols'
         required: false
         type: choice
         default: 'no'
@@ -83,17 +80,14 @@ jobs:
       - id: mx
         run: |
           set -euo pipefail
-
           archs=()
           if [ "${{ inputs.build_x86_32 }}" = "true" ]; then archs+=("x86_32"); fi
           if [ "${{ inputs.build_x86_64 }}" = "true" ]; then archs+=("x86_64"); fi
           if [ "${{ inputs.build_arm64 }}" = "true" ]; then archs+=("arm64"); fi
-
           if [ "${#archs[@]}" -eq 0 ]; then
             echo "No architectures selected."
             exit 1
           fi
-
           json='{"include":[]}'
           for a in "${archs[@]}"; do
             for t in template_debug template_release; do
@@ -103,7 +97,6 @@ jobs:
               done
             done
           done
-
           echo "matrix=$json" >> "$GITHUB_OUTPUT"
 
   build:
@@ -140,7 +133,6 @@ jobs:
         with:
           arch: ${{ matrix.arch == 'x86_32' && 'x86' || matrix.arch }}
 
-      # Establish a D3D12_MODE output for later compile step (default: no)
       - name: Set default D3D12 mode (no)
         id: d3d12mode
         shell: pwsh
@@ -165,10 +157,8 @@ jobs:
         shell: python
         run: |
           import json, os
-
           CRITICAL = {"Mutex", "Time", "Window"}
-
-          src = "build_profile.gdbuild"  # repo root
+          src = "build_profile.gdbuild"
           dst_profile = os.path.join("godot", "sanitized_build.gdbuild")
           dst_custom = os.path.join("godot", "custom.py")
 
@@ -180,8 +170,6 @@ jobs:
 
           data.setdefault("disabled_build_options", {})
           data.setdefault("disabled_classes", [])
-
-          # ONLY remove the 3 critical classes
           data["disabled_classes"] = [c for c in data["disabled_classes"] if c not in CRITICAL]
 
           with open(dst_profile, "w", encoding="utf-8", newline="\n") as f:
@@ -189,23 +177,22 @@ jobs:
 
           options = data.get("disabled_build_options", {})
           with open(dst_custom, "w", encoding="utf-8", newline="\n") as f:
-              # From build profile
               for k, v in options.items():
                   f.write(f'{k}="{"yes" if bool(v) else "no"}"\n')
-
-              f.write("\n# Workflow-driven options\n")
+              f.write("\n# Workflow-driven options (informational; CLI is authoritative)\n")
               f.write(f'optimize="${{ inputs.optimize }}"\n')
               f.write(f'debug_symbols="${{ inputs.debug_symbols }}"\n')
-
-              if "${{ inputs.production }}" == "true":
-                  f.write('production="yes"\n')
-
-              lto_mode = "${{ inputs.lto }}".strip()
-              if lto_mode and lto_mode != "none":
-                  f.write(f'lto="{lto_mode}"\n')
-
-              # d3d12 in custom.py (CLI also passes it explicitly)
               f.write('d3d12="no"\n')
+
+      - name: Decide LLVM usage (ThinLTO => use_llvm=yes)
+        id: llvm
+        shell: pwsh
+        run: |
+          if ("${{ inputs.lto }}" -eq "thin") {
+            "USE_LLVM=yes" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+            "USE_LLVM=no" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          }
 
       - name: Dump custom.py (debug)
         shell: pwsh
@@ -213,11 +200,15 @@ jobs:
           Write-Host "==== custom.py ===="
           Get-Content godot\custom.py
 
-      - name: Compile (all optional flags also passed on CLI)
+      - name: Compile (optional flags on CLI)
         working-directory: godot
         shell: cmd
         run: |
           echo Building ${{ matrix.target }} for ${{ matrix.arch }} (${{ matrix.subsystem }})
+
+          set USE_LLVM_FLAG=
+          if "${{ steps.llvm.outputs.USE_LLVM }}"=="yes" set USE_LLVM_FLAG=use_llvm=yes
+
           scons ^
             p=windows ^
             target=${{ matrix.target }} ^
@@ -229,6 +220,7 @@ jobs:
             optimize=${{ inputs.optimize }} ^
             lto=${{ inputs.lto }} ^
             production=${{ inputs.production && 'yes' || 'no' }} ^
+            %USE_LLVM_FLAG% ^
             -j4
 
       - name: Cleanup non-essential build files
