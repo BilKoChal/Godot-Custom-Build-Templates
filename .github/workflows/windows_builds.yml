@@ -132,7 +132,7 @@ jobs:
 
           CRITICAL = {"Mutex", "Time", "Window"}
 
-          # build_profile.gdbuild is now at repo root
+          # build_profile.gdbuild is at repo root
           src = "build_profile.gdbuild"
           dst_profile = os.path.join("godot", "sanitized_build.gdbuild")
           dst_custom = os.path.join("godot", "custom.py")
@@ -154,43 +154,44 @@ jobs:
               print("Removed critical classes from disabled_classes:", ", ".join(removed))
 
           # Write sanitized .gdbuild (still JSON)
-          with open(dst_profile, "w", encoding="utf-8") as f:
+          with open(dst_profile, "w", encoding="utf-8", newline="\n") as f:
               json.dump(data, f, indent=2)
 
-          # Generate custom.py: use disabled_build_options + small set of forced defaults
+          # Generate custom.py: disabled_build_options + forced defaults
           options = data.get("disabled_build_options", {})
-          with open(dst_custom, "w", encoding="utf-8") as f:
+          with open(dst_custom, "w", encoding="utf-8", newline="\n") as f:
               for k, v in options.items():
-                  f.write(f'{k}="{"yes" if bool(v) else "no"}"\\n')
+                  f.write(f'{k}="{"yes" if bool(v) else "no"}"\n')
 
-              f.write('\\n# Forced defaults (size-focused)\\n')
-              f.write('optimize="size"\\n')
-              f.write('debug_symbols="no"\\n')
+              f.write("\n# Forced defaults (size-focused)\n")
+              f.write('optimize="size"\n')
+              f.write('debug_symbols="no"\n')
 
-              # Optional production flag (default off)
+              # Optional production (default off)
               prod = "${{ inputs.production }}" == "true"
               if prod:
-                  f.write('production="yes"\\n')
+                  f.write('production="yes"\n')
 
               # Optional LTO (default none)
               lto_mode = "${{ inputs.lto }}".strip()
               if lto_mode and lto_mode != "none":
-                  f.write(f'lto="{lto_mode}"\\n')
+                  f.write(f'lto="{lto_mode}"\n')
 
               # D3D12 (default off unless enabled AND deps available)
               enable_d3d12 = "${{ inputs.enable_d3d12 }}" == "true"
               d3d12_available = "${{ steps.d3d12.outputs.D3D12_AVAILABLE }}" == "yes"
               if enable_d3d12 and d3d12_available:
-                  f.write('d3d12="yes"\\n')
+                  f.write('d3d12="yes"\n')
               else:
-                  f.write('d3d12="no"\\n')
+                  f.write('d3d12="no"\n')
 
           print("Wrote:", dst_profile)
           print("Wrote:", dst_custom)
 
-      - name: Show custom.py (debug)
+      - name: Dump custom.py (debug)
         shell: pwsh
         run: |
+          Write-Host "==== custom.py ===="
           Get-Content godot\custom.py
 
       - name: Compile
