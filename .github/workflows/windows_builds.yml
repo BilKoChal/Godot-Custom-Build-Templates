@@ -361,7 +361,8 @@ jobs:
             Write-Host "  $($_.Name) - ${sizeKB} KB" -ForegroundColor White
           }
 
-      - name: Test Executable
+      - name: Test Executable (x86 only)
+        if: matrix.arch != 'arm64'
         shell: pwsh
         run: |
           $exePath = Get-ChildItem godot/bin/*.exe | Select-Object -First 1
@@ -373,6 +374,21 @@ jobs:
             & $exePath.FullName --help | Select-Object -First 10
             
             Write-Host "Executable test passed!" -ForegroundColor Green
+          } else {
+            Write-Host "ERROR: No executable found!" -ForegroundColor Red
+            exit 1
+          }
+
+      - name: Verify ARM64 Build (skip execution test)
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: |
+          $exePath = Get-ChildItem godot/bin/*.exe | Select-Object -First 1
+          
+          if ($exePath) {
+            $sizeKB = [math]::Round($exePath.Length / 1KB, 2)
+            Write-Host "ARM64 executable built successfully: $($exePath.Name) (${sizeKB} KB)" -ForegroundColor Green
+            Write-Host "Note: Skipping execution test (ARM64 cannot run on x86_64 runner)" -ForegroundColor Yellow
           } else {
             Write-Host "ERROR: No executable found!" -ForegroundColor Red
             exit 1
