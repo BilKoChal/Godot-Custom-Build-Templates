@@ -35,7 +35,7 @@ on:
         description: 'Enable Direct3D 12 (installs deps). If unchecked, d3d12=no is forced.'
         required: false
         type: boolean
-        default: false
+        default: true
 
       production:
         description: 'production=yes'
@@ -140,12 +140,14 @@ jobs:
         with:
           arch: ${{ matrix.arch == 'x86_32' && 'x86' || matrix.arch }}
 
+      # Default D3D12 mode
       - name: Set default D3D12 mode (no)
         id: d3d12mode
         shell: pwsh
         run: |
           "D3D12_MODE=no" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
+      # Install deps if enabled (Godot docs: required to compile with d3d12=yes) [web:143]
       - name: Install D3D12 deps (Godot official script)
         if: inputs.enable_d3d12 == true
         working-directory: godot
@@ -183,11 +185,11 @@ jobs:
           with open(dst_profile, "w", encoding="utf-8", newline="\n") as f:
               json.dump(data, f, indent=2)
 
-          # custom.py only from disabled_build_options
           options = data.get("disabled_build_options", {})
           with open(dst_custom, "w", encoding="utf-8", newline="\n") as f:
               for k, v in options.items():
-                  f.write(f'{k}="{"yes" if bool(v) else "no"}"\n")
+                  val = "yes" if bool(v) else "no"
+                  f.write(f'{k}="{val}"\n')
 
       - name: Decide LLVM usage (ThinLTO => use_llvm=yes)
         id: llvm
@@ -242,27 +244,19 @@ jobs:
           if (-not $exes) { throw "No .exe files found in godot/bin" }
 
           if ($consoleSubsystem) {
-            # Expect single exe
             $exe = $exes | Select-Object -First 1
             Copy-Item $exe.FullName (Join-Path $outDir "windows_${mode}_${arch}.exe") -Force
-            Write-Host "Single output: windows_${mode}_${arch}.exe"
           } else {
-            # Expect 2 exes: normal and *.console.exe (order not guaranteed)
             $normal = $exes | Where-Object { $_.Name -notmatch '\.console\.exe$' } | Select-Object -First 1
             $console = $exes | Where-Object { $_.Name -match '\.console\.exe$' } | Select-Object -First 1
-
             if (-not $normal -or -not $console) {
               Write-Host "Found exes:"
               $exes | ForEach-Object { Write-Host " - $($_.Name)" }
-              throw "Expected both normal exe and *.console.exe when console_subsystem=false"
+              throw "Expected normal + *.console.exe outputs when console_subsystem=false"
             }
 
             Copy-Item $normal.FullName (Join-Path $outDir "windows_${mode}_${arch}.exe") -Force
             Copy-Item $console.FullName (Join-Path $outDir "windows_${mode}_${arch}_console.exe") -Force
-
-            Write-Host "Outputs:"
-            Write-Host " - windows_${mode}_${arch}.exe"
-            Write-Host " - windows_${mode}_${arch}_console.exe"
           }
 
       - name: Zip outputs (this job)
@@ -270,13 +264,9 @@ jobs:
         run: |
           $zipName = "${{ matrix.cache_name }}.zip"
           if (Test-Path $zipName) { Remove-Item $zipName -Force }
-
           $files = Get-ChildItem "godot/out" -Filter "windows_*.exe"
           if (-not $files) { throw "No outputs found in godot/out" }
-
           Compress-Archive -Path $files.FullName -DestinationPath $zipName
-          Write-Host "Created $zipName with:"
-          $files | ForEach-Object { Write-Host " - $($_.Name)" }
 
       - name: Test executable (skip ARM64)
         if: matrix.arch != 'arm64'
