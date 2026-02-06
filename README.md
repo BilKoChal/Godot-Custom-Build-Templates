@@ -34,59 +34,24 @@ Keep these files at the repository root:
 Click **Fork** on GitHub, then open your fork.
 
 ### 2) Edit `build_profile.gdbuild`
-This file is JSON (Godot uses `.gdbuild` extension). Example:
+This file is JSON (Godot uses `.gdbuild` extension).
 
-```json
-{
-  "disabled_build_options": {
-    "disable_3d": true,
-    "disable_xr": true,
-    "module_openxr_enabled": false
-  },
-  "disabled_classes": [
-    "XRServer",
-    "XRCamera3D",
-    "XRController3D"
-  ],
-  "type": "build_profile"
-}
-
-Critical classes protection
-
-The workflow will automatically remove these 3 classes from disabled_classes (if present), to avoid breaking the build:
-
-    Mutex
-
-    Time
-
-    Window
-
-Everything else in your profile stays untouched.
-3) Run the workflow
+### 3) Run the workflow
 
     Go to the Actions tab
-
     Select: 🏁 Build Custom Godot Templates (Windows)
-
     Click Run workflow
-
     Configure inputs:
-
         godot_ref (default: 4.6-stable) — you can use tags/branches/commits from Godot releases.
         https://github.com/godotengine/godot/releases
-
         Architectures: x86_32 / x86_64 / ARM64
-
         console_subsystem (default: off)
-
         Optional build flags: production, lto, optimize, debug_symbols
-
         enable_d3d12 (default: on)
 
-4) Download the templates
+### 4) Download the templates
 
 After it finishes:
 
     Download the combined artifact: godot-windows-custom-templates
-
     It contains a zip with all built EXEs (renamed to the format below).
