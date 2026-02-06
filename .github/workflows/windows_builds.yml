@@ -25,20 +25,22 @@ on:
         type: boolean
         default: true
 
+      # Rendering driver toggle (needs deps if enabled)
       enable_d3d12:
-        description: 'Enable DirectX 12 (auto-installs deps).'
+        description: 'Enable Direct3D 12 (installs deps). If unchecked, d3d12=no is forced.'
         required: false
         type: boolean
         default: false
 
+      # Production/LTO per docs
       production:
-        description: 'Enable production build'
+        description: 'production=yes (more optimizations, may enable LTO behavior)'
         required: false
         type: boolean
         default: false
 
       lto:
-        description: 'Link-Time Optimization (LTO)'
+        description: 'LTO mode (docs suggest full for max effect; thin is LLVM only).'
         required: false
         type: choice
         default: 'none'
@@ -47,6 +49,26 @@ on:
           - 'auto'
           - 'full'
           - 'thin'
+
+      # Size optimization per docs (size_extra available in newer Godot)
+      optimize:
+        description: 'Optimization focus'
+        required: false
+        type: choice
+        default: 'size'
+        options:
+          - 'speed'
+          - 'size'
+          - 'size_extra'
+
+      debug_symbols:
+        description: 'Include debug symbols (MSVC: use "no" for smaller binaries)'
+        required: false
+        type: choice
+        default: 'no'
+        options:
+          - 'no'
+          - 'yes'
 
 env:
   PYTHONIOENCODING: utf8
@@ -91,6 +113,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
+
     name: ${{ matrix.target }} ${{ matrix.arch }} (${{ matrix.subsystem }})
 
     steps:
@@ -117,29 +140,28 @@ jobs:
         with:
           arch: ${{ matrix.arch == 'x86_32' && 'x86' || matrix.arch }}
 
+      # Establish a D3D12_MODE output for later compile step (default: no)
+      - name: Set default D3D12 mode (no)
+        id: d3d12mode
+        shell: pwsh
+        run: |
+          "D3D12_MODE=no" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
       - name: Install D3D12 deps (Godot official script)
         if: inputs.enable_d3d12 == true
         working-directory: godot
         shell: pwsh
-        id: d3d12install
         run: |
           python misc\scripts\install_d3d12_sdk_windows.py
           if ($LASTEXITCODE -eq 0) {
             "D3D12_MODE=yes" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           } else {
-            Write-Host "D3D12 deps install failed; falling back to d3d12=no"
+            Write-Host "D3D12 deps install failed; forcing d3d12=no"
             "D3D12_MODE=no" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           }
         continue-on-error: true
 
-      - name: Default D3D12 mode (no)
-        if: inputs.enable_d3d12 != true
-        shell: pwsh
-        id: d3d12default
-        run: |
-          "D3D12_MODE=no" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-
-      - name: Generate custom.py and sanitized build profile
+      - name: Generate sanitized build profile + custom.py
         shell: python
         run: |
           import json, os
@@ -159,7 +181,7 @@ jobs:
           data.setdefault("disabled_build_options", {})
           data.setdefault("disabled_classes", [])
 
-          # ONLY remove the 3 critical classes (nothing else)
+          # ONLY remove the 3 critical classes
           data["disabled_classes"] = [c for c in data["disabled_classes"] if c not in CRITICAL]
 
           with open(dst_profile, "w", encoding="utf-8", newline="\n") as f:
@@ -167,24 +189,22 @@ jobs:
 
           options = data.get("disabled_build_options", {})
           with open(dst_custom, "w", encoding="utf-8", newline="\n") as f:
+              # From build profile
               for k, v in options.items():
                   f.write(f'{k}="{"yes" if bool(v) else "no"}"\n')
 
-              f.write("\n# Forced defaults (size-focused)\n")
-              f.write('optimize="size"\n')
-              f.write('debug_symbols="no"\n')
+              f.write("\n# Workflow-driven options\n")
+              f.write(f'optimize="${{ inputs.optimize }}"\n')
+              f.write(f'debug_symbols="${{ inputs.debug_symbols }}"\n')
 
-              # Optional production (default off)
-              prod = "${{ inputs.production }}" == "true"
-              if prod:
+              if "${{ inputs.production }}" == "true":
                   f.write('production="yes"\n')
 
-              # Optional LTO (default none)
               lto_mode = "${{ inputs.lto }}".strip()
               if lto_mode and lto_mode != "none":
                   f.write(f'lto="{lto_mode}"\n')
 
-              # d3d12 in custom.py too (CLI will still be authoritative)
+              # d3d12 in custom.py (CLI also passes it explicitly)
               f.write('d3d12="no"\n')
 
       - name: Dump custom.py (debug)
@@ -193,12 +213,23 @@ jobs:
           Write-Host "==== custom.py ===="
           Get-Content godot\custom.py
 
-      - name: Compile
+      - name: Compile (all optional flags also passed on CLI)
         working-directory: godot
         shell: cmd
         run: |
           echo Building ${{ matrix.target }} for ${{ matrix.arch }} (${{ matrix.subsystem }})
-          scons p=windows target=${{ matrix.target }} arch=${{ matrix.arch }} windows_subsystem=${{ matrix.subsystem }} build_profile=sanitized_build.gdbuild d3d12=${{ steps.d3d12install.outputs.D3D12_MODE || steps.d3d12default.outputs.D3D12_MODE }} -j4
+          scons ^
+            p=windows ^
+            target=${{ matrix.target }} ^
+            arch=${{ matrix.arch }} ^
+            windows_subsystem=${{ matrix.subsystem }} ^
+            build_profile=sanitized_build.gdbuild ^
+            d3d12=${{ steps.d3d12mode.outputs.D3D12_MODE }} ^
+            debug_symbols=${{ inputs.debug_symbols }} ^
+            optimize=${{ inputs.optimize }} ^
+            lto=${{ inputs.lto }} ^
+            production=${{ inputs.production && 'yes' || 'no' }} ^
+            -j4
 
       - name: Cleanup non-essential build files
         shell: pwsh
