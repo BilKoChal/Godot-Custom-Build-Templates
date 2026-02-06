@@ -1,0 +1,31 @@
+# Godot build artifacts
+godot/
+*.exe
+*.dll
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.obj
+
+# SCons cache
+.scons_cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Build artifacts
+bin/
+*.zip
+*.tpz
+
+# Logs
+*.log

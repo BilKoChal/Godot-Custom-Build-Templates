@@ -1,0 +1,16 @@
+{
+  "disabled_classes": [
+    "GridMap",
+    "NavigationRegion3D",
+    "NavigationAgent3D",
+    "XRCamera3D",
+    "XRController3D",
+    "XRServer"
+  ],
+  "disabled_build_options": {
+    "module_gridmap_enabled": false,
+    "module_navigation_enabled": false,
+    "module_openxr_enabled": false,
+    "module_webrtc_enabled": false
+  }
+}
